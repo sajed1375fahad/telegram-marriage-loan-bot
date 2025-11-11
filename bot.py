@@ -1,82 +1,266 @@
 import os
 import logging
 import sqlite3
+import time
 import asyncio
 from datetime import datetime
-from telegram import Update
+from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
-from flask import Flask
-import threading
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.options import Options
+from PIL import Image
+import io
 
-# توکن ربات تلگرام
+# توکن ربات
 BOT_TOKEN = "8355259038:AAE5a-fvTHNd7pX8Q4lOgNwAS-Ij2pcM154"
 
-# تنظیمات لاگ
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # مراحل ثبت نام
-NAME, NATIONAL_CODE, PHONE, CONFIRMATION = range(4)
+(
+    FATHER_NAME, FATHER_NATIONAL_CODE, FATHER_BIRTH_DATE, FATHER_PROVINCE, FATHER_CITY,
+    FATHER_PHONE, CHILD_NATIONAL_CODE, CHILD_BIRTH_DATE, CHILD_PROVINCE, CHILD_CITY,
+    PARENTS_STATUS, MOTHER_NATIONAL_CODE, MOTHER_BIRTH_DATE, MOTHER_PHONE,
+    BANK_PREFERENCE, CONFIRMATION
+) = range(16)
 
 class UserDatabase:
     def __init__(self):
-        self.conn = sqlite3.connect('users.db', check_same_thread=False)
-        self.create_table()
+        self.conn = sqlite3.connect('child_loan.db', check_same_thread=False)
+        self.create_tables()
     
-    def create_table(self):
+    def create_tables(self):
         cursor = self.conn.cursor()
+        
         cursor.execute('''
-            CREATE TABLE IF NOT EXISTS users (
+            CREATE TABLE IF NOT EXISTS child_loan_users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER,
-                name TEXT,
-                national_code TEXT,
-                phone TEXT,
+                chat_id INTEGER,
+                
+                -- اطلاعات پدر
+                father_name TEXT,
+                father_national_code TEXT UNIQUE,
+                father_birth_date TEXT,
+                father_province TEXT,
+                father_city TEXT,
+                father_phone TEXT,
+                
+                -- اطلاعات فرزند
+                child_national_code TEXT,
+                child_birth_date TEXT,
+                child_province TEXT,
+                child_city TEXT,
+                
+                -- وضعیت والدین
+                parents_status TEXT,
+                
+                -- اطلاعات مادر (در صورت جدا بودن)
+                mother_national_code TEXT,
+                mother_birth_date TEXT,
+                mother_phone TEXT,
+                
+                -- تنظیمات
+                bank_preference TEXT,
+                status TEXT DEFAULT 'pending',
+                last_response TEXT,
                 registration_date TEXT
             )
         ''')
+        
         self.conn.commit()
     
-    def add_user(self, user_id, name, national_code, phone):
+    def add_user(self, user_data):
         cursor = self.conn.cursor()
         registration_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
         cursor.execute('''
-            INSERT INTO users (user_id, name, national_code, phone, registration_date)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (user_id, name, national_code, phone, registration_date))
+            INSERT INTO child_loan_users 
+            (user_id, chat_id, father_name, father_national_code, father_birth_date,
+             father_province, father_city, father_phone, child_national_code,
+             child_birth_date, child_province, child_city, parents_status,
+             mother_national_code, mother_birth_date, mother_phone, bank_preference, registration_date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            user_data['user_id'], user_data['chat_id'],
+            user_data['father_name'], user_data['father_national_code'],
+            user_data['father_birth_date'], user_data['father_province'],
+            user_data['father_city'], user_data['father_phone'],
+            user_data['child_national_code'], user_data['child_birth_date'],
+            user_data['child_province'], user_data['child_city'],
+            user_data['parents_status'], user_data.get('mother_national_code'),
+            user_data.get('mother_birth_date'), user_data.get('mother_phone'),
+            user_data['bank_preference'], registration_date
+        ))
         self.conn.commit()
+        return cursor.lastrowid
     
     def user_exists(self, national_code):
         cursor = self.conn.cursor()
-        cursor.execute('SELECT * FROM users WHERE national_code = ?', (national_code,))
+        cursor.execute('SELECT * FROM child_loan_users WHERE father_national_code = ?', (national_code,))
         return cursor.fetchone() is not None
+    
+    def get_pending_users(self, bank_name=None):
+        cursor = self.conn.cursor()
+        if bank_name and bank_name != "هر بانکی که فعال شود":
+            cursor.execute(
+                'SELECT * FROM child_loan_users WHERE status = "pending" AND bank_preference = ? ORDER BY id',
+                (bank_name,)
+            )
+        else:
+            cursor.execute('SELECT * FROM child_loan_users WHERE status = "pending" ORDER BY id')
+        return cursor.fetchall()
+    
+    def update_user_status(self, user_id, status, response=None):
+        cursor = self.conn.cursor()
+        if response:
+            cursor.execute(
+                'UPDATE child_loan_users SET status = ?, last_response = ? WHERE id = ?',
+                (status, response, user_id)
+            )
+        else:
+            cursor.execute('UPDATE child_loan_users SET status = ? WHERE id = ?', (status, user_id))
+        self.conn.commit()
 
-# Flask app
-app = Flask(__name__)
+class ChildLoanAutomation:
+    def __init__(self, application):
+        self.application = application
+        self.db = UserDatabase()
+        self.setup_driver()
+    
+    def setup_driver(self):
+        """تنظیمات مرورگر"""
+        chrome_options = Options()
+        chrome_options.add_argument('--headless')
+        chrome_options.add_argument('--no-sandbox')
+        chrome_options.add_argument('--disable-dev-shm-usage')
+        chrome_options.add_argument('--window-size=1920,1080')
+        
+        self.driver = webdriver.Chrome(options=chrome_options)
+    
+    def take_screenshot(self):
+        """گرفتن عکس از صفحه"""
+        screenshot = self.driver.get_screenshot_as_png()
+        return io.BytesIO(screenshot)
+    
+    def fill_child_loan_form(self, user_data):
+        """پر کردن فرم وام فرزند"""
+        try:
+            # رفتن به صفحه فرم
+            self.driver.get("http://ve.cbi.ir")
+            time.sleep(5)
+            
+            # اطلاعات پدر
+            self.fill_field("شماره ملی پدر", user_data['father_national_code'])
+            self.fill_field("تاریخ تولد پدر", user_data['father_birth_date'])
+            self.select_dropdown("استان محل تولد پدر", user_data['father_province'])
+            self.select_dropdown("شهرستان محل تولد پدر", user_data['father_city'])
+            self.fill_field("شماره تلفن همراه پدر", user_data['father_phone'])
+            
+            # اطلاعات فرزند
+            self.fill_field("شماره ملی فرزند", user_data['child_national_code'])
+            self.fill_field("تاریخ تولد فرزند", user_data['child_birth_date'])
+            self.select_dropdown("استان محل تولد فرزند", user_data['child_province'])
+            self.select_dropdown("شهرستان محل تولد فرزند", user_data['child_city'])
+            
+            # وضعیت والدین
+            if user_data['parents_status'] == "جدا شده":
+                # تیک زدن گزینه جدا شدن والدین
+                checkbox = self.driver.find_element(By.XPATH, "//input[@type='checkbox']")
+                checkbox.click()
+                time.sleep(1)
+                
+                # پر کردن اطلاعات مادر
+                self.fill_field("شماره ملی مادر", user_data['mother_national_code'])
+                self.fill_field("تاریخ تولد مادر", user_data['mother_birth_date'])
+                self.fill_field("شماره تلفن همراه مادر", user_data['mother_phone'])
+            
+            # گرفتن عکس از فرم پر شده
+            filled_screenshot = self.take_screenshot()
+            
+            # ارسال فرم
+            submit_btn = self.driver.find_element(By.XPATH, "//button[contains(text(), 'ثبت')]")
+            submit_btn.click()
+            time.sleep(5)
+            
+            # گرفتن عکس از نتیجه
+            result_screenshot = self.take_screenshot()
+            
+            # بررسی نتیجه
+            page_source = self.driver.page_source
+            if "موفق" in page_source or "ثبت شد" in page_source:
+                return "success", filled_screenshot, result_screenshot
+            elif "کد رهگیری" in page_source:
+                return "tracking_code", filled_screenshot, result_screenshot
+            else:
+                return "unknown", filled_screenshot, result_screenshot
+                
+        except Exception as e:
+            logging.error(f"خطا در پر کردن فرم: {e}")
+            return "error", None, None
+    
+    def fill_field(self, field_label, value):
+        """پر کردن فیلد بر اساس لیبل"""
+        try:
+            field = self.driver.find_element(By.XPATH, f"//label[contains(text(), '{field_label}')]/following-sibling::input")
+            field.clear()
+            field.send_keys(value)
+            time.sleep(1)
+        except:
+            try:
+                # روش جایگزین برای پیدا کردن فیلد
+                field = self.driver.find_element(By.NAME, field_label.replace(" ", ""))
+                field.clear()
+                field.send_keys(value)
+                time.sleep(1)
+            except Exception as e:
+                logging.warning(f"فیلد {field_label} پیدا نشد: {e}")
+    
+    def select_dropdown(self, dropdown_label, value):
+        """انتخاب از dropdown"""
+        try:
+            dropdown = self.driver.find_element(By.XPATH, f"//label[contains(text(), '{dropdown_label}')]/following-sibling::select")
+            dropdown.click()
+            time.sleep(1)
+            
+            option = dropdown.find_element(By.XPATH, f".//option[contains(text(), '{value}')]")
+            option.click()
+            time.sleep(1)
+        except Exception as e:
+            logging.warning(f"Dropdown {dropdown_label} پیدا نشد: {e}")
 
-@app.route('/')
-def home():
-    return "🤖 ربات ثبت نام فعال است"
-
-@app.route('/health')
-def health():
-    return "OK", 200
-
-class LoanBot:
+class ChildLoanBot:
     def __init__(self):
         self.db = UserDatabase()
         self.application = Application.builder().token(BOT_TOKEN).build()
+        self.automation = ChildLoanAutomation(self.application)
         self.setup_handlers()
+        
+        # شروع مانیتورینگ
+        asyncio.create_task(self.start_monitoring())
     
     def setup_handlers(self):
         conv_handler = ConversationHandler(
             entry_points=[CommandHandler('start', self.start)],
             states={
-                NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.get_name)],
-                NATIONAL_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.get_national_code)],
-                PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.get_phone)],
+                FATHER_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.get_father_name)],
+                FATHER_NATIONAL_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.get_father_national_code)],
+                FATHER_BIRTH_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.get_father_birth_date)],
+                FATHER_PROVINCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.get_father_province)],
+                FATHER_CITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.get_father_city)],
+                FATHER_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.get_father_phone)],
+                CHILD_NATIONAL_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.get_child_national_code)],
+                CHILD_BIRTH_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.get_child_birth_date)],
+                CHILD_PROVINCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.get_child_province)],
+                CHILD_CITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.get_child_city)],
+                PARENTS_STATUS: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.get_parents_status)],
+                MOTHER_NATIONAL_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.get_mother_national_code)],
+                MOTHER_BIRTH_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.get_mother_birth_date)],
+                MOTHER_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.get_mother_phone)],
+                BANK_PREFERENCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.get_bank_preference)],
                 CONFIRMATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.confirm_registration)],
             },
             fallbacks=[CommandHandler('cancel', self.cancel)]
@@ -84,107 +268,149 @@ class LoanBot:
         
         self.application.add_handler(conv_handler)
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
+        self.application.add_handler(CommandHandler('status', self.check_status))
     
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text("👋 به ربات ثبت نام خوش آمدید!\nلطفاً نام و نام خانوادگی خود را وارد کنید:")
-        return NAME
+        await update.message.reply_text(
+            "👋 به ربات اتوماسیون **وام قرض الحسنه فرزند** خوش آمدید!\n\n"
+            "این ربات برای ثبت‌نام در سامانه ve.cbi.ir طراحی شده.\n\n"
+            "لطفاً **نام و نام خانوادگی پدر** را وارد کنید:"
+        )
+        return FATHER_NAME
     
-    async def get_name(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        context.user_data['name'] = update.message.text
-        await update.message.reply_text("🔢 کد ملی خود را وارد کنید:")
-        return NATIONAL_CODE
+    async def get_father_name(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        context.user_data['father_name'] = update.message.text
+        context.user_data['user_id'] = update.effective_user.id
+        context.user_data['chat_id'] = update.effective_chat.id
+        await update.message.reply_text("🔢 **کد ملی پدر** را وارد کنید:")
+        return FATHER_NATIONAL_CODE
     
-    async def get_national_code(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def get_father_national_code(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         national_code = update.message.text
-        
         if not national_code.isdigit() or len(national_code) != 10:
             await update.message.reply_text("❌ کد ملی باید 10 رقم باشد. لطفاً مجدداً وارد کنید:")
-            return NATIONAL_CODE
-        
+            return FATHER_NATIONAL_CODE
         if self.db.user_exists(national_code):
             await update.message.reply_text("❌ این کد ملی قبلاً ثبت شده است.")
             return ConversationHandler.END
-        
-        context.user_data['national_code'] = national_code
-        await update.message.reply_text("📱 شماره تلفن خود را وارد کنید:")
-        return PHONE
+        context.user_data['father_national_code'] = national_code
+        await update.message.reply_text("📅 **تاریخ تولد پدر** را به فرمت 1360/01/01 وارد کنید:")
+        return FATHER_BIRTH_DATE
     
-    async def get_phone(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        phone = update.message.text
+    async def get_father_birth_date(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        context.user_data['father_birth_date'] = update.message.text
         
+        provinces_keyboard = [["تهران", "البرز"], ["اصفهان", "فارس"], ["سایر استان‌ها"]]
+        reply_markup = ReplyKeyboardMarkup(provinces_keyboard, one_time_keyboard=True)
+        await update.message.reply_text("🏙️ **استان محل تولد پدر**:", reply_markup=reply_markup)
+        return FATHER_PROVINCE
+    
+    async def get_father_province(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        context.user_data['father_province'] = update.message.text
+        if update.message.text == "سایر استان‌ها":
+            await update.message.reply_text("🏙️ نام استان را وارد کنید:")
+            return FATHER_PROVINCE
+        await update.message.reply_text("🏘️ **شهرستان محل تولد پدر**:")
+        return FATHER_CITY
+    
+    async def get_father_city(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        context.user_data['father_city'] = update.message.text
+        await update.message.reply_text("📱 **شماره تلفن همراه پدر** را وارد کنید:")
+        return FATHER_PHONE
+    
+    async def get_father_phone(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        phone = update.message.text
         if not phone.startswith('09') or len(phone) != 11 or not phone.isdigit():
             await update.message.reply_text("❌ شماره تلفن باید 11 رقم و با 09 شروع شود. لطفاً مجدداً وارد کنید:")
-            return PHONE
+            return FATHER_PHONE
+        context.user_data['father_phone'] = phone
+        await update.message.reply_text("🔢 **کد ملی فرزند** را وارد کنید:")
+        return CHILD_NATIONAL_CODE
+    
+    async def get_child_national_code(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        context.user_data['child_national_code'] = update.message.text
+        await update.message.reply_text("📅 **تاریخ تولد فرزند** را به فرمت 1395/01/01 وارد کنید:")
+        return CHILD_BIRTH_DATE
+    
+    async def get_child_birth_date(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        context.user_data['child_birth_date'] = update.message.text
         
-        context.user_data['phone'] = phone
+        provinces_keyboard = [["تهران", "البرز"], ["اصفهان", "فارس"], ["سایر استان‌ها"]]
+        reply_markup = ReplyKeyboardMarkup(provinces_keyboard, one_time_keyboard=True)
+        await update.message.reply_text("🏙️ **استان محل تولد فرزند**:", reply_markup=reply_markup)
+        return CHILD_PROVINCE
+    
+    async def get_child_province(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        context.user_data['child_province'] = update.message.text
+        if update.message.text == "سایر استان‌ها":
+            await update.message.reply_text("🏙️ نام استان را وارد کنید:")
+            return CHILD_PROVINCE
+        await update.message.reply_text("🏘️ **شهرستان محل تولد فرزند**:")
+        return CHILD_CITY
+    
+    async def get_child_city(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        context.user_data['child_city'] = update.message.text
         
+        status_keyboard = [["با هم زندگی می‌کنند"], ["جدا شده"]]
+        reply_markup = ReplyKeyboardMarkup(status_keyboard, one_time_keyboard=True)
+        await update.message.reply_text(
+            "👨‍👩‍👧 **وضعیت والدین**:\n\n"
+            "• اگر با هم زندگی می‌کنند: 'با هم زندگی می‌کنند'\n"
+            "• اگر جدا شده‌اند: 'جدا شده'",
+            reply_markup=reply_markup
+        )
+        return PARENTS_STATUS
+    
+    async def get_parents_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        context.user_data['parents_status'] = update.message.text
+        
+        if update.message.text == "جدا شده":
+            await update.message.reply_text("🔢 **کد ملی مادر** را وارد کنید:")
+            return MOTHER_NATIONAL_CODE
+        else:
+            # رفتن مستقیم به انتخاب بانک
+            bank_keyboard = [["ملی", "صادرات"], ["هر بانکی که فعال شود"]]
+            reply_markup = ReplyKeyboardMarkup(bank_keyboard, one_time_keyboard=True)
+            await update.message.reply_text("🏦 **ترجیح بانکی**:", reply_markup=reply_markup)
+            return BANK_PREFERENCE
+    
+    async def get_mother_national_code(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        context.user_data['mother_national_code'] = update.message.text
+        await update.message.reply_text("📅 **تاریخ تولد مادر** را به فرمت 1360/01/01 وارد کنید:")
+        return MOTHER_BIRTH_DATE
+    
+    async def get_mother_birth_date(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        context.user_data['mother_birth_date'] = update.message.text
+        await update.message.reply_text("📱 **شماره تلفن همراه مادر** را وارد کنید:")
+        return MOTHER_PHONE
+    
+    async def get_mother_phone(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        phone = update.message.text
+        if not phone.startswith('09') or len(phone) != 11 or not phone.isdigit():
+            await update.message.reply_text("❌ شماره تلفن باید 11 رقم و با 09 شروع شود. لطفاً مجدداً وارد کنید:")
+            return MOTHER_PHONE
+        context.user_data['mother_phone'] = phone
+        
+        bank_keyboard = [["ملی", "صادرات"], ["هر بانکی که فعال شود"]]
+        reply_markup = ReplyKeyboardMarkup(bank_keyboard, one_time_keyboard=True)
+        await update.message.reply_text("🏦 **ترجیح بانکی**:", reply_markup=reply_markup)
+        return BANK_PREFERENCE
+    
+    async def get_bank_preference(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        context.user_data['bank_preference'] = update.message.text
+        
+        # نمایش اطلاعات نهایی
         user_data = context.user_data
         confirmation_text = (
-            "📋 اطلاعات ثبت نام:\n\n"
-            f"👤 نام: {user_data['name']}\n"
-            f"🔢 کد ملی: {user_data['national_code']}\n"
-            f"📱 تلفن: {user_data['phone']}\n\n"
-            "آیا اطلاعات صحیح است؟ (بله/خیر)"
+            "📋 **اطلاعات نهایی**:\n\n"
+            f"👨 **پدر**: {user_data['father_name']}\n"
+            f"🔢 **کد ملی پدر**: {user_data['father_national_code']}\n"
+            f"📱 **تلفن پدر**: {user_data['father_phone']}\n\n"
+            f"👶 **فرزند**: {user_data['child_national_code']}\n"
+            f"📅 **تولد فرزند**: {user_data['child_birth_date']}\n\n"
+            f"👥 **وضعیت والدین**: {user_data['parents_status']}\n"
         )
         
-        await update.message.reply_text(confirmation_text)
-        return CONFIRMATION
-    
-    async def confirm_registration(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        response = update.message.text.lower()
-        
-        if response in ['بله', 'yes', 'y', '✅']:
-            user_data = context.user_data
-            self.db.add_user(
-                update.effective_user.id,
-                user_data['name'],
-                user_data['national_code'],
-                user_data['phone']
-            )
-            
-            await update.message.reply_text("✅ ثبت نام با موفقیت انجام شد!\nبرای ثبت نام جدید /start را بزنید.")
-        else:
-            await update.message.reply_text("❌ ثبت نام لغو شد.\nبرای شروع مجدد /start را بزنید.")
-        
-        return ConversationHandler.END
-    
-    async def cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text("❌ عملیات لغو شد.")
-        return ConversationHandler.END
-    
-    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text("🤖 برای شروع ثبت نام /start را وارد کنید.")
-
-def run_bot():
-    """اجرای ربات"""
-    try:
-        # ایجاد event loop جدید برای این thread
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        bot = LoanBot()
-        print("🤖 ربات تلگرام در حال راه‌اندازی...")
-        
-        # اجرای ربات با event loop جدید
-        loop.run_until_complete(bot.application.run_polling(drop_pending_updates=True))
-    except Exception as e:
-        print(f"❌ خطا در اجرای ربات: {e}")
-
-def run_flask():
-    """اجرای Flask"""
-    try:
-        port = int(os.getenv('PORT', 8000))
-        print(f"🌐 Flask روی پورت {port}")
-        app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
-    except Exception as e:
-        print(f"❌ خطا در Flask: {e}")
-
-if __name__ == "__main__":
-    print("🔧 شروع راه‌اندازی...")
-    
-    # اجرای ربات در thread جداگانه
-    bot_thread = threading.Thread(target=run_bot, daemon=True)
-    bot_thread.start()
-    
-    # اجرای Flask در thread اصلی
-    run_flask()
+        if user_data['parents_status'] == "جدا شده":
+            confirmation_text += f"👩 **کد ملی مادر**: {user_data['mother_national_code']}\n"
+            confirmati
