@@ -158,9 +158,15 @@ class LoanBot:
 def run_bot():
     """اجرای ربات"""
     try:
+        # ایجاد event loop جدید برای این thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
         bot = LoanBot()
-        print("🤖 ربات در حال راه‌اندازی...")
-        asyncio.run(bot.application.run_polling(drop_pending_updates=True))
+        print("🤖 ربات تلگرام در حال راه‌اندازی...")
+        
+        # اجرای ربات با event loop جدید
+        loop.run_until_complete(bot.application.run_polling(drop_pending_updates=True))
     except Exception as e:
         print(f"❌ خطا در اجرای ربات: {e}")
 
@@ -176,5 +182,9 @@ def run_flask():
 if __name__ == "__main__":
     print("🔧 شروع راه‌اندازی...")
     
-    # فقط Flask رو اجرا کن - ربات رو حذف کردیم
+    # اجرای ربات در thread جداگانه
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
+    bot_thread.start()
+    
+    # اجرای Flask در thread اصلی
     run_flask()
