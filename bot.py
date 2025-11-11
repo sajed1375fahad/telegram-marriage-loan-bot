@@ -11,6 +11,8 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
+from flask import Flask
+import threading
 from PIL import Image
 import io
 
@@ -24,8 +26,23 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
     FATHER_NAME, FATHER_NATIONAL_CODE, FATHER_BIRTH_DATE, FATHER_PROVINCE, FATHER_CITY,
     FATHER_PHONE, CHILD_NATIONAL_CODE, CHILD_BIRTH_DATE, CHILD_PROVINCE, CHILD_CITY,
     PARENTS_STATUS, MOTHER_NATIONAL_CODE, MOTHER_BIRTH_DATE, MOTHER_PHONE,
-    BANK_PREFERENCE, CONFIRMATION
-) = range(16)
+    BANK_PREFERENCE, CONFIRMATION, VERIFICATION_CODE
+) = range(17)
+
+# Flask app برای Koyeb
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "🤖 ربات اتوماسیون وام فرزند فعال است"
+
+@app.route('/health')
+def health():
+    return "OK", 200
+
+@app.route('/api/status')
+def status():
+    return {"status": "active", "service": "child_loan_automation", "timestamp": datetime.now().isoformat()}
 
 class UserDatabase:
     def __init__(self):
@@ -66,6 +83,7 @@ class UserDatabase:
                 -- تنظیمات
                 bank_preference TEXT,
                 status TEXT DEFAULT 'pending',
+                verification_code TEXT,
                 last_response TEXT,
                 registration_date TEXT
             )
@@ -114,9 +132,14 @@ class UserDatabase:
             cursor.execute('SELECT * FROM child_loan_users WHERE status = "pending" ORDER BY id')
         return cursor.fetchall()
     
-    def update_user_status(self, user_id, status, response=None):
+    def update_user_status(self, user_id, status, verification_code=None, response=None):
         cursor = self.conn.cursor()
-        if response:
+        if verification_code:
+            cursor.execute(
+                'UPDATE child_loan_users SET status = ?, verification_code = ?, last_response = ? WHERE id = ?',
+                (status, verification_code, response, user_id)
+            )
+        elif response:
             cursor.execute(
                 'UPDATE child_loan_users SET status = ?, last_response = ? WHERE id = ?',
                 (status, response, user_id)
@@ -132,7 +155,7 @@ class ChildLoanAutomation:
         self.setup_driver()
     
     def setup_driver(self):
-        """تنظیمات مرورگر"""
+        """تنظیمات مرورگر برای اتوماسیون"""
         chrome_options = Options()
         chrome_options.add_argument('--headless')
         chrome_options.add_argument('--no-sandbox')
@@ -146,10 +169,12 @@ class ChildLoanAutomation:
         screenshot = self.driver.get_screenshot_as_png()
         return io.BytesIO(screenshot)
     
-    def fill_child_loan_form(self, user_data):
-        """پر کردن فرم وام فرزند"""
+    def smart_form_filler(self, user_data):
+        """پر کردن هوشمند فرم وام فرزند"""
         try:
-            # رفتن به صفحه فرم
+            logging.info(f"شروع ثبت‌نام برای {user_data['father_name']}")
+            
+            # رفتن به صفحه سامانه
             self.driver.get("http://ve.cbi.ir")
             time.sleep(5)
             
@@ -169,7 +194,7 @@ class ChildLoanAutomation:
             # وضعیت والدین
             if user_data['parents_status'] == "جدا شده":
                 # تیک زدن گزینه جدا شدن والدین
-                checkbox = self.driver.find_element(By.XPATH, "//input[@type='checkbox']")
+                checkbox = self.driver.find_element(By.XPATH, "//input[@type='checkbox' and contains(@name, 'جدا')]")
                 checkbox.click()
                 time.sleep(1)
                 
@@ -182,21 +207,24 @@ class ChildLoanAutomation:
             filled_screenshot = self.take_screenshot()
             
             # ارسال فرم
-            submit_btn = self.driver.find_element(By.XPATH, "//button[contains(text(), 'ثبت')]")
-            submit_btn.click()
-            time.sleep(5)
-            
-            # گرفتن عکس از نتیجه
-            result_screenshot = self.take_screenshot()
-            
-            # بررسی نتیجه
-            page_source = self.driver.page_source
-            if "موفق" in page_source or "ثبت شد" in page_source:
-                return "success", filled_screenshot, result_screenshot
-            elif "کد رهگیری" in page_source:
-                return "tracking_code", filled_screenshot, result_screenshot
+            submit_buttons = self.driver.find_elements(By.XPATH, "//button[contains(text(), 'ثبت')]")
+            if submit_buttons:
+                submit_buttons[0].click()
+                time.sleep(5)
+                
+                # گرفتن عکس از نتیجه
+                result_screenshot = self.take_screenshot()
+                
+                # بررسی نتیجه
+                page_source = self.driver.page_source
+                if "موفق" in page_source or "ثبت شد" in page_source:
+                    return "success", filled_screenshot, result_screenshot
+                elif "کد رهگیری" in page_source or "پیامک" in page_source:
+                    return "need_verification", filled_screenshot, result_screenshot
+                else:
+                    return "unknown", filled_screenshot, result_screenshot
             else:
-                return "unknown", filled_screenshot, result_screenshot
+                return "no_submit_button", filled_screenshot, None
                 
         except Exception as e:
             logging.error(f"خطا در پر کردن فرم: {e}")
@@ -205,19 +233,28 @@ class ChildLoanAutomation:
     def fill_field(self, field_label, value):
         """پر کردن فیلد بر اساس لیبل"""
         try:
+            # روش اول: پیدا کردن فیلد با لیبل
             field = self.driver.find_element(By.XPATH, f"//label[contains(text(), '{field_label}')]/following-sibling::input")
             field.clear()
             field.send_keys(value)
             time.sleep(1)
         except:
             try:
-                # روش جایگزین برای پیدا کردن فیلد
-                field = self.driver.find_element(By.NAME, field_label.replace(" ", ""))
+                # روش دوم: پیدا کردن با placeholder
+                field = self.driver.find_element(By.XPATH, f"//input[contains(@placeholder, '{field_label}')]")
                 field.clear()
                 field.send_keys(value)
                 time.sleep(1)
-            except Exception as e:
-                logging.warning(f"فیلد {field_label} پیدا نشد: {e}")
+            except:
+                try:
+                    # روش سوم: پیدا کردن با name
+                    field_name = field_label.replace(" ", "").replace("‌", "")
+                    field = self.driver.find_element(By.NAME, field_name)
+                    field.clear()
+                    field.send_keys(value)
+                    time.sleep(1)
+                except Exception as e:
+                    logging.warning(f"فیلد {field_label} پیدا نشد: {e}")
     
     def select_dropdown(self, dropdown_label, value):
         """انتخاب از dropdown"""
@@ -231,6 +268,31 @@ class ChildLoanAutomation:
             time.sleep(1)
         except Exception as e:
             logging.warning(f"Dropdown {dropdown_label} پیدا نشد: {e}")
+    
+    def check_bank_availability(self, bank_name):
+        """بررسی فعال بودن بانک"""
+        try:
+            bank_urls = {
+                'ملی': 'http://ve.cbi.ir/bank/melli',
+                'صادرات': 'http://ve.cbi.ir/bank/saderat',
+            }
+            
+            url = bank_urls.get(bank_name, 'http://ve.cbi.ir')
+            self.driver.get(url)
+            time.sleep(5)
+            
+            # بررسی وجود فرم
+            forms = self.driver.find_elements(By.TAG_NAME, 'form')
+            buttons = self.driver.find_elements(By.XPATH, "//button[contains(text(), 'ثبت')]")
+            
+            is_active = len(forms) > 0 or len(buttons) > 0
+            logging.info(f"وضعیت بانک {bank_name}: فعال={is_active}")
+            
+            return is_active
+            
+        except Exception as e:
+            logging.error(f"خطا در بررسی بانک {bank_name}: {e}")
+            return False
 
 class ChildLoanBot:
     def __init__(self):
@@ -240,7 +302,7 @@ class ChildLoanBot:
         self.setup_handlers()
         
         # شروع مانیتورینگ
-        asyncio.create_task(self.start_monitoring())
+        asyncio.create_task(self.start_24_7_monitoring())
     
     def setup_handlers(self):
         conv_handler = ConversationHandler(
@@ -262,6 +324,7 @@ class ChildLoanBot:
                 MOTHER_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.get_mother_phone)],
                 BANK_PREFERENCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.get_bank_preference)],
                 CONFIRMATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.confirm_registration)],
+                VERIFICATION_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.get_verification_code)],
             },
             fallbacks=[CommandHandler('cancel', self.cancel)]
         )
@@ -269,11 +332,16 @@ class ChildLoanBot:
         self.application.add_handler(conv_handler)
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
         self.application.add_handler(CommandHandler('status', self.check_status))
+        self.application.add_handler(CommandHandler('report', self.get_report))
     
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
-            "👋 به ربات اتوماسیون **وام قرض الحسنه فرزند** خوش آمدید!\n\n"
-            "این ربات برای ثبت‌نام در سامانه ve.cbi.ir طراحی شده.\n\n"
+            "👋 به ربات **اتوماسیون وام قرض الحسنه فرزند** خوش آمدید!\n\n"
+            "🤖 این ربات به صورت 24/7:\n"
+            "• سامانه بانک‌ها رو بررسی می‌کنه\n"
+            "• فرم‌ها رو هوشمند پر می‌کنه\n"  
+            "• عکس از تمام مراحل براتون می‌فرسته\n"
+            "• به محض فعال شدن بانک، ثبت‌نام می‌کنه\n\n"
             "لطفاً **نام و نام خانوادگی پدر** را وارد کنید:"
         )
         return FATHER_NAME
@@ -355,62 +423,10 @@ class ChildLoanBot:
         reply_markup = ReplyKeyboardMarkup(status_keyboard, one_time_keyboard=True)
         await update.message.reply_text(
             "👨‍👩‍👧 **وضعیت والدین**:\n\n"
-            "• اگر با هم زندگی می‌کنند: 'با هم زندگی می‌کنند'\n"
+            "• اگر با هم زندگی می‌کنند: 'با هم زندگی می‌کنند'\n"  
             "• اگر جدا شده‌اند: 'جدا شده'",
             reply_markup=reply_markup
         )
         return PARENTS_STATUS
     
-    async def get_parents_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        context.user_data['parents_status'] = update.message.text
-        
-        if update.message.text == "جدا شده":
-            await update.message.reply_text("🔢 **کد ملی مادر** را وارد کنید:")
-            return MOTHER_NATIONAL_CODE
-        else:
-            # رفتن مستقیم به انتخاب بانک
-            bank_keyboard = [["ملی", "صادرات"], ["هر بانکی که فعال شود"]]
-            reply_markup = ReplyKeyboardMarkup(bank_keyboard, one_time_keyboard=True)
-            await update.message.reply_text("🏦 **ترجیح بانکی**:", reply_markup=reply_markup)
-            return BANK_PREFERENCE
-    
-    async def get_mother_national_code(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        context.user_data['mother_national_code'] = update.message.text
-        await update.message.reply_text("📅 **تاریخ تولد مادر** را به فرمت 1360/01/01 وارد کنید:")
-        return MOTHER_BIRTH_DATE
-    
-    async def get_mother_birth_date(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        context.user_data['mother_birth_date'] = update.message.text
-        await update.message.reply_text("📱 **شماره تلفن همراه مادر** را وارد کنید:")
-        return MOTHER_PHONE
-    
-    async def get_mother_phone(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        phone = update.message.text
-        if not phone.startswith('09') or len(phone) != 11 or not phone.isdigit():
-            await update.message.reply_text("❌ شماره تلفن باید 11 رقم و با 09 شروع شود. لطفاً مجدداً وارد کنید:")
-            return MOTHER_PHONE
-        context.user_data['mother_phone'] = phone
-        
-        bank_keyboard = [["ملی", "صادرات"], ["هر بانکی که فعال شود"]]
-        reply_markup = ReplyKeyboardMarkup(bank_keyboard, one_time_keyboard=True)
-        await update.message.reply_text("🏦 **ترجیح بانکی**:", reply_markup=reply_markup)
-        return BANK_PREFERENCE
-    
-    async def get_bank_preference(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        context.user_data['bank_preference'] = update.message.text
-        
-        # نمایش اطلاعات نهایی
-        user_data = context.user_data
-        confirmation_text = (
-            "📋 **اطلاعات نهایی**:\n\n"
-            f"👨 **پدر**: {user_data['father_name']}\n"
-            f"🔢 **کد ملی پدر**: {user_data['father_national_code']}\n"
-            f"📱 **تلفن پدر**: {user_data['father_phone']}\n\n"
-            f"👶 **فرزند**: {user_data['child_national_code']}\n"
-            f"📅 **تولد فرزند**: {user_data['child_birth_date']}\n\n"
-            f"👥 **وضعیت والدین**: {user_data['parents_status']}\n"
-        )
-        
-        if user_data['parents_status'] == "جدا شده":
-            confirmation_text += f"👩 **کد ملی مادر**: {user_data['mother_national_code']}\n"
-            confirmati
+    async def get_parents_status(self, update: Update, context: ContextT
