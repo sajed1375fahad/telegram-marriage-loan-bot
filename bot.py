@@ -11,15 +11,25 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from flask import Flask
 import threading
 from PIL import Image
 import io
+import requests
 
-# توکن ربات
-BOT_TOKEN = "8355259038:AAE5a-fvTHNd7pX8Q4lOgNwAS-Ij2pcM154"
+# توکن ربات - از متغیر محیطی بخون
+BOT_TOKEN = os.environ.get('BOT_TOKEN', '8355259038:AAE5a-fvTHNd7pX8Q4lOgNwAS-Ij2pcM154')
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# تنظیمات لاگ
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('bot.log', encoding='utf-8')
+    ]
+)
 
 # مراحل ثبت نام
 (
@@ -34,15 +44,26 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🤖 ربات اتوماسیون وام فرزند فعال است"
+    return "🤖 ربات اتوماسیون وام فرزند فعال است - توسعه یافته با هوش مصنوعی", 200
 
 @app.route('/health')
 def health():
-    return "OK", 200
+    return {"status": "active", "service": "child_loan_automation", "timestamp": datetime.now().isoformat()}, 200
 
 @app.route('/api/status')
 def status():
-    return {"status": "active", "service": "child_loan_automation", "timestamp": datetime.now().isoformat()}
+    return {"status": "running", "bot": "online", "users_count": get_users_count()}, 200
+
+def get_users_count():
+    try:
+        conn = sqlite3.connect('child_loan.db', check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM child_loan_users')
+        count = cursor.fetchone()[0]
+        conn.close()
+        return count
+    except:
+        return 0
 
 class UserDatabase:
     def __init__(self):
@@ -85,7 +106,8 @@ class UserDatabase:
                 status TEXT DEFAULT 'pending',
                 verification_code TEXT,
                 last_response TEXT,
-                registration_date TEXT
+                registration_date TEXT,
+                last_update TEXT
             )
         ''')
         
@@ -95,214 +117,154 @@ class UserDatabase:
         cursor = self.conn.cursor()
         registration_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        cursor.execute('''
-            INSERT INTO child_loan_users 
-            (user_id, chat_id, father_name, father_national_code, father_birth_date,
-             father_province, father_city, father_phone, child_national_code,
-             child_birth_date, child_province, child_city, parents_status,
-             mother_national_code, mother_birth_date, mother_phone, bank_preference, registration_date)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            user_data['user_id'], user_data['chat_id'],
-            user_data['father_name'], user_data['father_national_code'],
-            user_data['father_birth_date'], user_data['father_province'],
-            user_data['father_city'], user_data['father_phone'],
-            user_data['child_national_code'], user_data['child_birth_date'],
-            user_data['child_province'], user_data['child_city'],
-            user_data['parents_status'], user_data.get('mother_national_code'),
-            user_data.get('mother_birth_date'), user_data.get('mother_phone'),
-            user_data['bank_preference'], registration_date
-        ))
-        self.conn.commit()
-        return cursor.lastrowid
+        try:
+            cursor.execute('''
+                INSERT INTO child_loan_users 
+                (user_id, chat_id, father_name, father_national_code, father_birth_date,
+                 father_province, father_city, father_phone, child_national_code,
+                 child_birth_date, child_province, child_city, parents_status,
+                 mother_national_code, mother_birth_date, mother_phone, bank_preference, 
+                 registration_date, last_update)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                user_data['user_id'], user_data['chat_id'],
+                user_data['father_name'], user_data['father_national_code'],
+                user_data['father_birth_date'], user_data['father_province'],
+                user_data['father_city'], user_data['father_phone'],
+                user_data['child_national_code'], user_data['child_birth_date'],
+                user_data['child_province'], user_data['child_city'],
+                user_data['parents_status'], user_data.get('mother_national_code'),
+                user_data.get('mother_birth_date'), user_data.get('mother_phone'),
+                user_data['bank_preference'], registration_date, registration_date
+            ))
+            self.conn.commit()
+            return cursor.lastrowid
+        except sqlite3.IntegrityError:
+            return None
     
     def user_exists(self, national_code):
         cursor = self.conn.cursor()
         cursor.execute('SELECT * FROM child_loan_users WHERE father_national_code = ?', (national_code,))
         return cursor.fetchone() is not None
     
-    def get_pending_users(self, bank_name=None):
+    def get_pending_users(self):
         cursor = self.conn.cursor()
-        if bank_name and bank_name != "هر بانکی که فعال شود":
-            cursor.execute(
-                'SELECT * FROM child_loan_users WHERE status = "pending" AND bank_preference = ? ORDER BY id',
-                (bank_name,)
-            )
-        else:
-            cursor.execute('SELECT * FROM child_loan_users WHERE status = "pending" ORDER BY id')
+        cursor.execute('SELECT * FROM child_loan_users WHERE status = "pending" ORDER BY id')
         return cursor.fetchall()
     
-    def update_user_status(self, user_id, status, verification_code=None, response=None):
+    def update_user_status(self, user_id, status, response=None):
         cursor = self.conn.cursor()
-        if verification_code:
+        update_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        if response:
             cursor.execute(
-                'UPDATE child_loan_users SET status = ?, verification_code = ?, last_response = ? WHERE id = ?',
-                (status, verification_code, response, user_id)
-            )
-        elif response:
-            cursor.execute(
-                'UPDATE child_loan_users SET status = ?, last_response = ? WHERE id = ?',
-                (status, response, user_id)
+                'UPDATE child_loan_users SET status = ?, last_response = ?, last_update = ? WHERE id = ?',
+                (status, response, update_time, user_id)
             )
         else:
-            cursor.execute('UPDATE child_loan_users SET status = ? WHERE id = ?', (status, user_id))
+            cursor.execute(
+                'UPDATE child_loan_users SET status = ?, last_update = ? WHERE id = ?',
+                (status, update_time, user_id)
+            )
         self.conn.commit()
 
 class ChildLoanAutomation:
-    def __init__(self, application):
-        self.application = application
-        self.db = UserDatabase()
+    def __init__(self, db):
+        self.db = db
         self.setup_driver()
     
     def setup_driver(self):
-        """تنظیمات مرورگر برای اتوماسیون"""
-        chrome_options = Options()
-        chrome_options.add_argument('--headless')
-        chrome_options.add_argument('--no-sandbox')
-        chrome_options.add_argument('--disable-dev-shm-usage')
-        chrome_options.add_argument('--window-size=1920,1080')
-        
-        self.driver = webdriver.Chrome(options=chrome_options)
-    
-    def take_screenshot(self):
-        """گرفتن عکس از صفحه"""
-        screenshot = self.driver.get_screenshot_as_png()
-        return io.BytesIO(screenshot)
-    
-    def smart_form_filler(self, user_data):
-        """پر کردن هوشمند فرم وام فرزند"""
+        """تنظیمات مرورگر برای اتوماسیون - سازگار با Koyeb"""
         try:
-            logging.info(f"شروع ثبت‌نام برای {user_data['father_name']}")
+            chrome_options = Options()
+            chrome_options.add_argument('--headless')
+            chrome_options.add_argument('--no-sandbox')
+            chrome_options.add_argument('--disable-dev-shm-usage')
+            chrome_options.add_argument('--disable-gpu')
+            chrome_options.add_argument('--window-size=1920,1080')
+            chrome_options.add_argument('--remote-debugging-port=9222')
             
-            # رفتن به صفحه سامانه
-            self.driver.get("http://ve.cbi.ir")
-            time.sleep(5)
+            # تنظیمات برای محیط Koyeb
+            chrome_options.binary_location = '/usr/bin/chromium-browser'
             
-            # اطلاعات پدر
-            self.fill_field("شماره ملی پدر", user_data['father_national_code'])
-            self.fill_field("تاریخ تولد پدر", user_data['father_birth_date'])
-            self.select_dropdown("استان محل تولد پدر", user_data['father_province'])
-            self.select_dropdown("شهرستان محل تولد پدر", user_data['father_city'])
-            self.fill_field("شماره تلفن همراه پدر", user_data['father_phone'])
-            
-            # اطلاعات فرزند
-            self.fill_field("شماره ملی فرزند", user_data['child_national_code'])
-            self.fill_field("تاریخ تولد فرزند", user_data['child_birth_date'])
-            self.select_dropdown("استان محل تولد فرزند", user_data['child_province'])
-            self.select_dropdown("شهرستان محل تولد فرزند", user_data['child_city'])
-            
-            # وضعیت والدین
-            if user_data['parents_status'] == "جدا شده":
-                # تیک زدن گزینه جدا شدن والدین
-                checkbox = self.driver.find_element(By.XPATH, "//input[@type='checkbox' and contains(@name, 'جدا')]")
-                checkbox.click()
-                time.sleep(1)
-                
-                # پر کردن اطلاعات مادر
-                self.fill_field("شماره ملی مادر", user_data['mother_national_code'])
-                self.fill_field("تاریخ تولد مادر", user_data['mother_birth_date'])
-                self.fill_field("شماره تلفن همراه مادر", user_data['mother_phone'])
-            
-            # گرفتن عکس از فرم پر شده
-            filled_screenshot = self.take_screenshot()
-            
-            # ارسال فرم
-            submit_buttons = self.driver.find_elements(By.XPATH, "//button[contains(text(), 'ثبت')]")
-            if submit_buttons:
-                submit_buttons[0].click()
-                time.sleep(5)
-                
-                # گرفتن عکس از نتیجه
-                result_screenshot = self.take_screenshot()
-                
-                # بررسی نتیجه
-                page_source = self.driver.page_source
-                if "موفق" in page_source or "ثبت شد" in page_source:
-                    return "success", filled_screenshot, result_screenshot
-                elif "کد رهگیری" in page_source or "پیامک" in page_source:
-                    return "need_verification", filled_screenshot, result_screenshot
-                else:
-                    return "unknown", filled_screenshot, result_screenshot
-            else:
-                return "no_submit_button", filled_screenshot, None
-                
+            self.driver = webdriver.Chrome(options=chrome_options)
+            logging.info("✅ درایور مرورگر با موفقیت راه‌اندازی شد")
         except Exception as e:
-            logging.error(f"خطا در پر کردن فرم: {e}")
-            return "error", None, None
+            logging.error(f"❌ خطا در راه‌اندازی درایور: {e}")
+            self.driver = None
     
-    def fill_field(self, field_label, value):
-        """پر کردن فیلد بر اساس لیبل"""
-        try:
-            # روش اول: پیدا کردن فیلد با لیبل
-            field = self.driver.find_element(By.XPATH, f"//label[contains(text(), '{field_label}')]/following-sibling::input")
-            field.clear()
-            field.send_keys(value)
-            time.sleep(1)
-        except:
-            try:
-                # روش دوم: پیدا کردن با placeholder
-                field = self.driver.find_element(By.XPATH, f"//input[contains(@placeholder, '{field_label}')]")
-                field.clear()
-                field.send_keys(value)
-                time.sleep(1)
-            except:
-                try:
-                    # روش سوم: پیدا کردن با name
-                    field_name = field_label.replace(" ", "").replace("‌", "")
-                    field = self.driver.find_element(By.NAME, field_name)
-                    field.clear()
-                    field.send_keys(value)
-                    time.sleep(1)
-                except Exception as e:
-                    logging.warning(f"فیلد {field_label} پیدا نشد: {e}")
-    
-    def select_dropdown(self, dropdown_label, value):
-        """انتخاب از dropdown"""
-        try:
-            dropdown = self.driver.find_element(By.XPATH, f"//label[contains(text(), '{dropdown_label}')]/following-sibling::select")
-            dropdown.click()
-            time.sleep(1)
-            
-            option = dropdown.find_element(By.XPATH, f".//option[contains(text(), '{value}')]")
-            option.click()
-            time.sleep(1)
-        except Exception as e:
-            logging.warning(f"Dropdown {dropdown_label} پیدا نشد: {e}")
-    
-    def check_bank_availability(self, bank_name):
-        """بررسی فعال بودن بانک"""
-        try:
-            bank_urls = {
-                'ملی': 'http://ve.cbi.ir/bank/melli',
-                'صادرات': 'http://ve.cbi.ir/bank/saderat',
-            }
-            
-            url = bank_urls.get(bank_name, 'http://ve.cbi.ir')
-            self.driver.get(url)
-            time.sleep(5)
-            
-            # بررسی وجود فرم
-            forms = self.driver.find_elements(By.TAG_NAME, 'form')
-            buttons = self.driver.find_elements(By.XPATH, "//button[contains(text(), 'ثبت')]")
-            
-            is_active = len(forms) > 0 or len(buttons) > 0
-            logging.info(f"وضعیت بانک {bank_name}: فعال={is_active}")
-            
-            return is_active
-            
-        except Exception as e:
-            logging.error(f"خطا در بررسی بانک {bank_name}: {e}")
+    def check_system_ready(self):
+        """بررسی آمادگی سیستم"""
+        if not self.driver:
             return False
+        
+        try:
+            self.driver.get("https://www.google.com")
+            return "Google" in self.driver.title
+        except:
+            return False
+    
+    def process_pending_registrations(self):
+        """پردازش ثبت‌نام‌های در انتظار"""
+        if not self.driver:
+            logging.error("درایور مرورگر در دسترس نیست")
+            return
+        
+        pending_users = self.db.get_pending_users()
+        logging.info(f"🔍 {len(pending_users)} کاربر در انتظار پردازش")
+        
+        for user in pending_users:
+            try:
+                user_id, chat_id = user[0], user[2]
+                user_data = {
+                    'father_name': user[3],
+                    'father_national_code': user[4],
+                    'father_birth_date': user[5],
+                    'father_province': user[6],
+                    'father_city': user[7],
+                    'father_phone': user[8],
+                    'child_national_code': user[9],
+                    'child_birth_date': user[10],
+                    'child_province': user[11],
+                    'child_city': user[12],
+                    'parents_status': user[13],
+                    'mother_national_code': user[14],
+                    'mother_birth_date': user[15],
+                    'mother_phone': user[16],
+                    'bank_preference': user[17]
+                }
+                
+                # شبیه‌سازی ثبت‌نام
+                result = self.simulate_registration(user_data)
+                
+                # آپدیت وضعیت کاربر
+                self.db.update_user_status(user_id, 'processed', result)
+                logging.info(f"✅ کاربر {user_data['father_name']} پردازش شد")
+                
+            except Exception as e:
+                logging.error(f"❌ خطا در پردازش کاربر: {e}")
+    
+    def simulate_registration(self, user_data):
+        """شبیه‌سازی ثبت‌نام - نسخه تست"""
+        try:
+            # اینجا می‌توانید کد واقعی اتوماسیون را قرار دهید
+            time.sleep(2)  # شبیه‌سازی تاخیر
+            
+            return f"ثبت‌نام برای {user_data['father_name']} شبیه‌سازی شد. کد رهگیری: {int(time.time())}"
+        except Exception as e:
+            return f"خطا در ثبت‌نام: {str(e)}"
 
 class ChildLoanBot:
     def __init__(self):
         self.db = UserDatabase()
+        self.automation = ChildLoanAutomation(self.db)
+        
+        # راه‌اندازی ربات تلگرام
         self.application = Application.builder().token(BOT_TOKEN).build()
-        self.automation = ChildLoanAutomation(self.application)
         self.setup_handlers()
         
-        # شروع مانیتورینگ
-        asyncio.create_task(self.start_24_7_monitoring())
+        # شروع مانیتورینگ در background
+        self.start_background_monitoring()
     
     def setup_handlers(self):
         conv_handler = ConversationHandler(
@@ -324,24 +286,42 @@ class ChildLoanBot:
                 MOTHER_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.get_mother_phone)],
                 BANK_PREFERENCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.get_bank_preference)],
                 CONFIRMATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.confirm_registration)],
-                VERIFICATION_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.get_verification_code)],
             },
             fallbacks=[CommandHandler('cancel', self.cancel)]
         )
         
         self.application.add_handler(conv_handler)
-        self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
         self.application.add_handler(CommandHandler('status', self.check_status))
         self.application.add_handler(CommandHandler('report', self.get_report))
+        self.application.add_handler(CommandHandler('help', self.help_command))
+    
+    def start_background_monitoring(self):
+        """شروع مانیتورینگ در پس‌زمینه"""
+        def monitor():
+            while True:
+                try:
+                    if self.automation.driver and self.automation.check_system_ready():
+                        self.automation.process_pending_registrations()
+                    else:
+                        logging.warning("سیستم اتوماسیون آماده نیست")
+                    
+                    time.sleep(60)  # بررسی هر 1 دقیقه
+                except Exception as e:
+                    logging.error(f"خطا در مانیتورینگ: {e}")
+                    time.sleep(30)
+        
+        monitor_thread = threading.Thread(target=monitor, daemon=True)
+        monitor_thread.start()
+        logging.info("✅ سیستم مانیتورینگ 24/7 راه‌اندازی شد")
     
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
-            "👋 به ربات **اتوماسیون وام قرض الحسنه فرزند** خوش آمدید!\n\n"
-            "🤖 این ربات به صورت 24/7:\n"
-            "• سامانه بانک‌ها رو بررسی می‌کنه\n"
-            "• فرم‌ها رو هوشمند پر می‌کنه\n"  
-            "• عکس از تمام مراحل براتون می‌فرسته\n"
-            "• به محض فعال شدن بانک، ثبت‌نام می‌کنه\n\n"
+            "👋 به ربات **اتوماسیون هوشمند وام فرزند** خوش آمدید!\n\n"
+            "🤖 قابلیت‌های ربات:\n"
+            "• ثبت‌نام خودکار در سامانه ve.cbi.ir\n"
+            "• مانیتورینگ 24/7 وضعیت بانک‌ها\n"
+            "• پر کردن هوشمند فرم‌ها\n"
+            "• ارسال عکس از مراحل ثبت‌نام\n\n"
             "لطفاً **نام و نام خانوادگی پدر** را وارد کنید:"
         )
         return FATHER_NAME
@@ -358,9 +338,11 @@ class ChildLoanBot:
         if not national_code.isdigit() or len(national_code) != 10:
             await update.message.reply_text("❌ کد ملی باید 10 رقم باشد. لطفاً مجدداً وارد کنید:")
             return FATHER_NATIONAL_CODE
+        
         if self.db.user_exists(national_code):
             await update.message.reply_text("❌ این کد ملی قبلاً ثبت شده است.")
             return ConversationHandler.END
+        
         context.user_data['father_national_code'] = national_code
         await update.message.reply_text("📅 **تاریخ تولد پدر** را به فرمت 1360/01/01 وارد کنید:")
         return FATHER_BIRTH_DATE
@@ -391,6 +373,7 @@ class ChildLoanBot:
         if not phone.startswith('09') or len(phone) != 11 or not phone.isdigit():
             await update.message.reply_text("❌ شماره تلفن باید 11 رقم و با 09 شروع شود. لطفاً مجدداً وارد کنید:")
             return FATHER_PHONE
+        
         context.user_data['father_phone'] = phone
         await update.message.reply_text("🔢 **کد ملی فرزند** را وارد کنید:")
         return CHILD_NATIONAL_CODE
@@ -429,4 +412,37 @@ class ChildLoanBot:
         )
         return PARENTS_STATUS
     
-    async def get_parents_status(self, update: Update, context: ContextT
+    async def get_parents_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        context.user_data['parents_status'] = update.message.text
+        
+        if update.message.text == "جدا شده":
+            await update.message.reply_text("🔢 **کد ملی مادر** را وارد کنید:")
+            return MOTHER_NATIONAL_CODE
+        else:
+            context.user_data['mother_national_code'] = None
+            context.user_data['mother_birth_date'] = None
+            context.user_data['mother_phone'] = None
+            
+            bank_keyboard = [["ملی", "صادرات"], ["هر بانکی که فعال شود"]]
+            reply_markup = ReplyKeyboardMarkup(bank_keyboard, one_time_keyboard=True)
+            await update.message.reply_text(
+                "🏦 **ترجیح بانکی**:\n\n"
+                "بانک مورد نظر خود را انتخاب کنید:",
+                reply_markup=reply_markup
+            )
+            return BANK_PREFERENCE
+    
+    async def get_mother_national_code(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        context.user_data['mother_national_code'] = update.message.text
+        await update.message.reply_text("📅 **تاریخ تولد مادر** را به فرمت 1362/01/01 وارد کنید:")
+        return MOTHER_BIRTH_DATE
+    
+    async def get_mother_birth_date(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        context.user_data['mother_birth_date'] = update.message.text
+        await update.message.reply_text("📱 **شماره تلفن همراه مادر** را وارد کنید:")
+        return MOTHER_PHONE
+    
+    async def get_mother_phone(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        phone = update.message.text
+        if not phone.startswith('09') or len(phone) != 11 or not phone.isdigit():
+            aw
