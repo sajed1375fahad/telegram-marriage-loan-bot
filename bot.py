@@ -17,32 +17,51 @@ application = Application.builder().token(BOT_TOKEN).build()
 # دستور start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 به ربات وام فرزند خوش آمدید!\n\n"
-        "✅ سیستم فعال است\n"
-        "برای ثبت‌نام از /register استفاده کنید"
+        "👋 به ربات **اتوماسیون وام فرزند** خوش آمدید!\n\n"
+        "📋 دستورهای موجود:\n"
+        "/start - راهنمایی\n"
+        "/register - ثبت‌نام وام\n"  
+        "/status - وضعیت سیستم\n"
+        "/help - راهنمایی\n\n"
+        "برای شروع ثبت‌نام از /register استفاده کنید."
     )
 
 # دستور register
 async def register(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📝 ثبت‌نام وام فرزند\n\n"
-        "لطفاً نام و نام خانوادگی خود را وارد کنید:"
+        "📝 **ثبت‌نام وام فرزند**\n\n"
+        "لطفاً نام و نام خانوادگی پدر را وارد کنید:"
     )
 
 # دستور status
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📊 وضعیت سیستم:\n"
+        "📊 **وضعیت سیستم**:\n\n"
         "• ربات: فعال ✅\n"
-        "• سرور: Railway ✅\n"
-        "• وضعیت: آماده ثبت‌نام"
+        "• سرور: Railway ✅\n" 
+        "• وضعیت: آماده ثبت‌نام\n"
+        "• میزبان: Railway"
+    )
+
+# دستور help
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📖 **راهنمای ربات**:\n\n"
+        "این ربات برای ثبت‌نام خودکار وام فرزند طراحی شده است.\n\n"
+        "دستورها:\n"
+        "/start - شروع کار با ربات\n"
+        "/register - ثبت‌نام جدید\n"
+        "/status - وضعیت سیستم\n"
+        "/help - نمایش این راهنما"
     )
 
 # تنظیم هندلرها
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("register", register))
-application.add_handler(CommandHandler("status", status))
-application.add_handler(CommandHandler("help", start))
+def setup_handlers():
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("register", register))
+    application.add_handler(CommandHandler("status", status))
+    application.add_handler(CommandHandler("help", help_command))
+    logger.info("✅ هندلرها ثبت شدند")
 
 # راه‌اندازی webhook
 def setup_webhook():
@@ -59,24 +78,40 @@ def setup_webhook():
         application.initialize()
         logger.info("✅ ربات راه‌اندازی شد")
         
+        return True
     except Exception as e:
         logger.error(f"❌ خطا در راه‌اندازی ربات: {e}")
+        return False
 
 # route برای webhook
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
+        # لاگ درخواست
+        logger.info("📨 دریافت webhook")
+        
         update = Update.de_json(request.get_json(), application.bot)
         application.process_update(update)
         return "OK", 200
     except Exception as e:
-        logger.error(f"خطا در webhook: {e}")
+        logger.error(f"❌ خطا در webhook: {e}")
         return "Error", 500
 
 # routes دیگر
 @app.route('/')
 def home():
-    return "✅ ربات فعال - از /start در تلگرام استفاده کنید", 200
+    return """
+    <!DOCTYPE html>
+    <html dir="rtl">
+    <head><meta charset="UTF-8"><title>ربات وام فرزند</title></head>
+    <body style="font-family: Tahoma; text-align: center; padding: 50px;">
+        <h1>🤖 ربات وام فرزند</h1>
+        <p>ربات فعال است - از /start در تلگرام استفاده کنید</p>
+        <p><a href="/setup">تنظیم مجدد ربات</a></p>
+        <p><a href="/test-bot">تست اتصال</a></p>
+    </body>
+    </html>
+    """, 200
 
 @app.route('/test-bot')
 def test_bot():
@@ -89,8 +124,19 @@ def test_bot():
 
 @app.route('/setup')
 def setup():
-    setup_webhook()
-    return "✅ Webhook تنظیم شد", 200
+    # ثبت هندلرها
+    setup_handlers()
+    
+    # تنظیم webhook
+    success = setup_webhook()
+    
+    if success:
+        return "✅ ربات کامل تنظیم شد - دستورها فعال شدند", 200
+    else:
+        return "❌ خطا در تنظیم ربات", 500
+
+# راه‌اندازی اولیه
+setup_handlers()
 
 if __name__ == "__main__":
     # تنظیم webhook
