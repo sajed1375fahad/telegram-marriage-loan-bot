@@ -135,7 +135,9 @@ def simulate_sms_verification(chat_id, phone_number):
     )
 
 def validate_data(step, value):
-    errors = {
+    """اعتبارسنجی داده‌های ورودی - فقط برای فیلدهای خاص"""
+    
+    validation_rules = {
         'father_national_code': lambda v: len(v) == 10 and v.isdigit() or "کد ملی باید 10 رقم باشد",
         'father_phone': lambda v: v.startswith('09') and len(v) == 11 and v.isdigit() or "شماره تلفن باید 11 رقم و با 09 شروع شود",
         'mother_national_code': lambda v: len(v) == 10 and v.isdigit() or "کد ملی باید 10 رقم باشد", 
@@ -144,10 +146,11 @@ def validate_data(step, value):
         'child_number': lambda v: v.isdigit() and 1 <= int(v) <= 10 or "شماره فرزند باید بین 1 تا 10 باشد"
     }
     
-    if step in errors:
-        result = errors[step](value)
+    if step in validation_rules:
+        result = validation_rules[step](value)
         if isinstance(result, str):
             return False, result
+    
     return True, ""
 
 def handle_registration_step(chat_id, text):
@@ -157,11 +160,15 @@ def handle_registration_step(chat_id, text):
     user_data = user_states[chat_id]
     current_step = user_data['step']
     
-    is_valid, error_msg = validate_data(current_step, text)
-    if not is_valid:
-        send_telegram_message(chat_id, f"❌ {error_msg}\n\nلطفاً مجدد وارد کنید:")
-        return
+    # فقط فیلدهای خاص رو اعتبارسنجی کن (نه پاسخ بله/خیر)
+    if current_step in ['father_national_code', 'father_phone', 'mother_national_code', 
+                       'mother_phone', 'child_national_code', 'child_number']:
+        is_valid, error_msg = validate_data(current_step, text)
+        if not is_valid:
+            send_telegram_message(chat_id, f"❌ {error_msg}\n\nلطفاً مجدد وارد کنید:")
+            return
     
+    # ذخیره داده فعلی
     user_data['data'][current_step] = text
     
     next_step = None
@@ -184,6 +191,7 @@ def handle_registration_step(chat_id, text):
         return
     
     elif current_step == 'parents_status':
+        # اینجا متن رو مستقیماً پردازش کن بدون اعتبارسنجی
         if text.lower() in ['بله', '✅ بله']:
             user_data['data']['parents_separated'] = True
             next_step = 'mother_national_code'
