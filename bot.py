@@ -5,7 +5,6 @@ import time
 import random
 from datetime import datetime
 from flask import Flask, request
-import json
 import requests
 
 # تنظیمات
@@ -15,48 +14,48 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# دیتابیس
+# دیتابیس بدون کامنت
 def init_db():
-    conn = sqlite3.connect('users.db', check_same_thread=False)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS registrations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER,
-            # اطلاعات پدر
-            father_national_code TEXT,
-            father_birth_date TEXT,
-            father_province TEXT,
-            father_city TEXT,
-            father_phone TEXT,
-            # وضعیت والدین
-            parents_separated BOOLEAN DEFAULT FALSE,
-            mother_national_code TEXT,
-            mother_birth_date TEXT,
-            mother_phone TEXT,
-            # اطلاعات فرزند
-            child_national_code TEXT,
-            child_birth_date TEXT,
-            child_province TEXT,
-            child_city TEXT,
-            child_number INTEGER,
-            # وضعیت
-            sms_verified BOOLEAN DEFAULT FALSE,
-            sms_code TEXT,
-            status TEXT DEFAULT 'pending',
-            tracking_code TEXT,
-            created_at TEXT
-        )
-    ''')
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect('users.db', check_same_thread=False)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER,
+                father_national_code TEXT,
+                father_birth_date TEXT,
+                father_province TEXT,
+                father_city TEXT,
+                father_phone TEXT,
+                parents_separated BOOLEAN,
+                mother_national_code TEXT,
+                mother_birth_date TEXT,
+                mother_phone TEXT,
+                child_national_code TEXT,
+                child_birth_date TEXT,
+                child_province TEXT,
+                child_city TEXT,
+                child_number INTEGER,
+                sms_code TEXT,
+                tracking_code TEXT,
+                created_at TEXT
+            )
+        ''')
+        
+        conn.commit()
+        conn.close()
+        logger.info("✅ دیتابیس ایجاد شد")
+    except Exception as e:
+        logger.error(f"❌ خطا در ایجاد دیتابیس: {e}")
 
 init_db()
 
 # وضعیت کاربران
 user_states = {}
 
-# مراحل ثبت‌نام - مطابق ترتیب سامانه
+# مراحل ثبت‌نام
 REGISTRATION_STEPS = {
     'father_national_code': '🔢 <b>شماره ملی پدر</b> را وارد کنید:',
     'father_birth_date': '📅 <b>تاریخ تولد پدر</b> را به فرمت 1360/01/01 وارد کنید:',
@@ -133,15 +132,12 @@ def start_registration(chat_id, username):
 
 # شبیه‌سازی ارسال کد SMS
 def simulate_sms_verification(chat_id, phone_number):
-    """شبیه‌سازی ارسال کد تأیید به موبایل"""
     sms_code = generate_sms_code()
     
-    # ذخیره کد برای کاربر
     if chat_id in user_states:
         user_states[chat_id]['data']['sms_code'] = sms_code
         user_states[chat_id]['step'] = 'sms_verification'
     
-    # در واقعیت این کد به تلفن کاربر ارسال می‌شود
     send_telegram_message(chat_id,
         f"📲 <b>کد تأیید ۵ رقمی</b>\n\n"
         f"کد تأیید به شماره {phone_number} ارسال شد.\n\n"
@@ -151,7 +147,6 @@ def simulate_sms_verification(chat_id, phone_number):
 
 # اعتبارسنجی داده‌ها
 def validate_data(step, value):
-    """اعتبارسنجی داده‌های ورودی"""
     errors = {
         'father_national_code': lambda v: len(v) == 10 and v.isdigit() or "کد ملی باید 10 رقم باشد",
         'father_phone': lambda v: v.startswith('09') and len(v) == 11 and v.isdigit() or "شماره تلفن باید 11 رقم و با 09 شروع شود",
@@ -175,16 +170,13 @@ def handle_registration_step(chat_id, text):
     user_data = user_states[chat_id]
     current_step = user_data['step']
     
-    # اعتبارسنجی داده
     is_valid, error_msg = validate_data(current_step, text)
     if not is_valid:
         send_telegram_message(chat_id, f"❌ {error_msg}\n\nلطفاً مجدد وارد کنید:")
         return
     
-    # ذخیره داده فعلی
     user_data['data'][current_step] = text
     
-    # تعیین مرحله بعد
     next_step = None
     
     if current_step == 'father_national_code':
@@ -238,23 +230,19 @@ def handle_registration_step(chat_id, text):
         return
     
     elif current_step == 'child_number':
-        # شبیه‌سازی ارسال کد SMS
         phone_number = user_data['data'].get('father_phone')
         simulate_sms_verification(chat_id, phone_number)
         return
     
     elif current_step == 'sms_verification':
-        # بررسی کد تأیید
         correct_code = user_data['data'].get('sms_code')
         if text == correct_code:
             user_data['data']['sms_verified'] = True
-            # ثبت نهایی
             save_registration(chat_id, user_data['data'])
         else:
             send_telegram_message(chat_id, "❌ کد تأیید نادرست است. مجدد وارد کنید:")
         return
     
-    # رفتن به مرحله بعد
     if next_step:
         user_data['step'] = next_step
         send_telegram_message(chat_id, REGISTRATION_STEPS[next_step])
@@ -268,13 +256,12 @@ def save_registration(chat_id, data):
         tracking_code = f"TRK{int(datetime.now().timestamp())}"
         
         cursor.execute('''
-            INSERT INTO registrations (
+            INSERT INTO users (
                 chat_id, father_national_code, father_birth_date, father_province,
                 father_city, father_phone, parents_separated, mother_national_code,
                 mother_birth_date, mother_phone, child_national_code, child_birth_date,
-                child_province, child_city, child_number, sms_verified, sms_code, 
-                tracking_code, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                child_province, child_city, child_number, sms_code, tracking_code, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             chat_id,
             data.get('father_national_code'),
@@ -291,7 +278,6 @@ def save_registration(chat_id, data):
             data.get('child_province'),
             data.get('child_city'),
             data.get('child_number'),
-            True,  # sms_verified
             data.get('sms_code'),
             tracking_code,
             datetime.now().isoformat()
@@ -300,7 +286,6 @@ def save_registration(chat_id, data):
         conn.commit()
         conn.close()
         
-        # خلاصه اطلاعات
         summary = f"""
 📋 <b>خلاصه ثبت‌نام:</b>
 
@@ -324,7 +309,6 @@ def save_registration(chat_id, data):
 • فرزند: {data.get('child_number')}م
         """
         
-        # ارسال پیام موفقیت
         success_message = (
             "✅ <b>ثبت‌نام با موفقیت انجام شد!</b>\n\n"
             f"{summary}\n\n"
@@ -336,7 +320,6 @@ def save_registration(chat_id, data):
         
         send_telegram_message(chat_id, success_message)
         
-        # پاک کردن وضعیت کاربر
         if chat_id in user_states:
             del user_states[chat_id]
             
@@ -365,7 +348,7 @@ def handle_command(chat_id, command, username):
     elif command == '/status':
         conn = sqlite3.connect('users.db', check_same_thread=False)
         cursor = conn.cursor()
-        cursor.execute('SELECT COUNT(*) FROM registrations WHERE chat_id = ?', (chat_id,))
+        cursor.execute('SELECT COUNT(*) FROM users WHERE chat_id = ?', (chat_id,))
         count = cursor.fetchone()[0]
         conn.close()
         
@@ -398,7 +381,7 @@ def handle_command(chat_id, command, username):
             send_telegram_message(chat_id, 
                 "❌ دستور نامعتبر. از /start استفاده کنید.")
 
-# Webhook و routes دیگر
+# Webhook
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
