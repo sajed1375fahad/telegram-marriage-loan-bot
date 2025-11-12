@@ -1,20 +1,17 @@
 import os
 import logging
 import sqlite3
-import time
 import random
 from datetime import datetime
 from flask import Flask, request
 import requests
 
-# تنظیمات
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# دیتابیس بدون کامنت
 def init_db():
     try:
         conn = sqlite3.connect('users.db', check_same_thread=False)
@@ -46,16 +43,14 @@ def init_db():
         
         conn.commit()
         conn.close()
-        logger.info("✅ دیتابیس ایجاد شد")
+        logger.info("Database created successfully")
     except Exception as e:
-        logger.error(f"❌ خطا در ایجاد دیتابیس: {e}")
+        logger.error(f"Database error: {e}")
 
 init_db()
 
-# وضعیت کاربران
 user_states = {}
 
-# مراحل ثبت‌نام
 REGISTRATION_STEPS = {
     'father_national_code': '🔢 <b>شماره ملی پدر</b> را وارد کنید:',
     'father_birth_date': '📅 <b>تاریخ تولد پدر</b> را به فرمت 1360/01/01 وارد کنید:',
@@ -73,7 +68,6 @@ REGISTRATION_STEPS = {
     'child_number': '👶 <b>فرزند چندم</b> هست؟\n(۱ برای فرزند اول، ۲ برای فرزند دوم و ...):'
 }
 
-# ارسال پیام به تلگرام
 def send_telegram_message(chat_id, text, reply_markup=None):
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -88,10 +82,9 @@ def send_telegram_message(chat_id, text, reply_markup=None):
         response = requests.post(url, json=payload)
         return response.status_code == 200
     except Exception as e:
-        logger.error(f"خطا در ارسال پیام: {e}")
+        logger.error(f"Send message error: {e}")
         return False
 
-# صفحه کلید برای بله/خیر
 def create_yes_no_keyboard():
     return {
         'keyboard': [
@@ -101,7 +94,6 @@ def create_yes_no_keyboard():
         'one_time_keyboard': True
     }
 
-# صفحه کلید برای شماره فرزند
 def create_child_number_keyboard():
     return {
         'keyboard': [
@@ -112,11 +104,9 @@ def create_child_number_keyboard():
         'one_time_keyboard': True
     }
 
-# تولید کد ۵ رقمی
 def generate_sms_code():
     return str(random.randint(10000, 99999))
 
-# شروع ثبت‌نام
 def start_registration(chat_id, username):
     user_states[chat_id] = {
         'step': 'father_national_code',
@@ -130,7 +120,6 @@ def start_registration(chat_id, username):
         + REGISTRATION_STEPS['father_national_code']
     )
 
-# شبیه‌سازی ارسال کد SMS
 def simulate_sms_verification(chat_id, phone_number):
     sms_code = generate_sms_code()
     
@@ -141,11 +130,10 @@ def simulate_sms_verification(chat_id, phone_number):
     send_telegram_message(chat_id,
         f"📲 <b>کد تأیید ۵ رقمی</b>\n\n"
         f"کد تأیید به شماره {phone_number} ارسال شد.\n\n"
-        f"🔐 <b>کد تست (برای آزمایش):</b> <code>{sms_code}</code>\n\n"
-        f"لطفاً کد دریافتی را وارد کنید:"
+        f"🔐 <b>کد تست:</b> <code>{sms_code}</code>\n\n"
+        f"لطفاً کد را وارد کنید:"
     )
 
-# اعتبارسنجی داده‌ها
 def validate_data(step, value):
     errors = {
         'father_national_code': lambda v: len(v) == 10 and v.isdigit() or "کد ملی باید 10 رقم باشد",
@@ -162,7 +150,6 @@ def validate_data(step, value):
             return False, result
     return True, ""
 
-# پردازش پاسخ کاربر
 def handle_registration_step(chat_id, text):
     if chat_id not in user_states:
         return
@@ -193,8 +180,7 @@ def handle_registration_step(chat_id, text):
     
     elif current_step == 'father_phone':
         next_step = 'parents_status'
-        send_telegram_message(chat_id, REGISTRATION_STEPS['parents_status'], 
-                            create_yes_no_keyboard())
+        send_telegram_message(chat_id, REGISTRATION_STEPS['parents_status'], create_yes_no_keyboard())
         return
     
     elif current_step == 'parents_status':
@@ -225,8 +211,7 @@ def handle_registration_step(chat_id, text):
     
     elif current_step == 'child_city':
         next_step = 'child_number'
-        send_telegram_message(chat_id, REGISTRATION_STEPS['child_number'],
-                            create_child_number_keyboard())
+        send_telegram_message(chat_id, REGISTRATION_STEPS['child_number'], create_child_number_keyboard())
         return
     
     elif current_step == 'child_number':
@@ -247,7 +232,6 @@ def handle_registration_step(chat_id, text):
         user_data['step'] = next_step
         send_telegram_message(chat_id, REGISTRATION_STEPS[next_step])
 
-# ذخیره ثبت‌نام در دیتابیس
 def save_registration(chat_id, data):
     try:
         conn = sqlite3.connect('users.db', check_same_thread=False)
@@ -313,8 +297,7 @@ def save_registration(chat_id, data):
             "✅ <b>ثبت‌نام با موفقیت انجام شد!</b>\n\n"
             f"{summary}\n\n"
             f"📋 <b>کد رهگیری:</b> <code>{tracking_code}</code>\n\n"
-            "🤖 <b>اتوماسیون فعال شد</b>\n"
-            "ربات به صورت خودکار سامانه را بررسی می‌کند و ثبت‌نام نهایی را انجام می‌دهد.\n\n"
+            "🤖 ربات به صورت خودکار سامانه را بررسی می‌کند.\n\n"
             "📊 برای مشاهده وضعیت از /status استفاده کنید."
         )
         
@@ -324,10 +307,9 @@ def save_registration(chat_id, data):
             del user_states[chat_id]
             
     except Exception as e:
-        logger.error(f"خطا در ذخیره ثبت‌نام: {e}")
+        logger.error(f"Save error: {e}")
         send_telegram_message(chat_id, "❌ خطا در ثبت اطلاعات. لطفاً مجدد تلاش کنید.")
 
-# پردازش دستورها
 def handle_command(chat_id, command, username):
     if command == '/start':
         message = (
@@ -369,8 +351,7 @@ def handle_command(chat_id, command, username):
             "/start - شروع کار\n"
             "/register - ثبت‌نام جدید\n" 
             "/status - وضعیت سیستم\n"
-            "/help - نمایش این راهنما\n\n"
-            "🤖 ربات به صورت 24/7 سامانه را بررسی می‌کند."
+            "/help - نمایش این راهنما"
         )
         send_telegram_message(chat_id, message)
     
@@ -378,10 +359,8 @@ def handle_command(chat_id, command, username):
         if chat_id in user_states:
             handle_registration_step(chat_id, command)
         else:
-            send_telegram_message(chat_id, 
-                "❌ دستور نامعتبر. از /start استفاده کنید.")
+            send_telegram_message(chat_id, "❌ دستور نامعتبر. از /start استفاده کنید.")
 
-# Webhook
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
@@ -404,7 +383,7 @@ def webhook():
         return "OK", 200
         
     except Exception as e:
-        logger.error(f"خطا در webhook: {e}")
+        logger.error(f"Webhook error: {e}")
         return "Error", 500
 
 @app.route('/')
@@ -431,5 +410,5 @@ def setup():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    logger.info(f"🚀 شروع برنامه روی پورت {port}")
+    logger.info(f"Starting on port {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
