@@ -14,13 +14,45 @@ app = Flask(__name__)
 # ایجاد ربات
 application = Application.builder().token(BOT_TOKEN).build()
 
-# دستور ساده start
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# دستور start - بدون async
+def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"📨 دستور start دریافت شد از: {update.effective_user.first_name}")
-    await update.message.reply_text("✅ ربات فعال است! تست موفق.")
+    
+    # استفاده از run_async برای هندل کردن async
+    application.create_task(
+        update.message.reply_text(
+            "✅ ربات فعال است!\n\n"
+            "📋 دستورهای موجود:\n"
+            "/start - راهنمایی\n"
+            "/register - ثبت‌نام\n"
+            "/status - وضعیت\n"
+            "/help - راهنما"
+        )
+    )
 
-# هندلر ساده
+# دستور register
+def register(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    application.create_task(
+        update.message.reply_text("📝 برای ثبت‌نام آماده هستیم...")
+    )
+
+# دستور status
+def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    application.create_task(
+        update.message.reply_text("📊 سیستم فعال و آماده است")
+    )
+
+# دستور help
+def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    application.create_task(
+        update.message.reply_text("📖 راهنمای ربات وام فرزند")
+    )
+
+# تنظیم هندلرها
 application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("register", register))
+application.add_handler(CommandHandler("status", status))
+application.add_handler(CommandHandler("help", help_command))
 
 # راه‌اندازی webhook
 def setup_bot():
@@ -79,10 +111,11 @@ def debug():
         info = bot.get_me()
         return f"""
         <h1>دیباگ ربات</h1>
-        <p>ربات: {info.first_name}</p>
-        <p>یوزرنیم: @{info.username}</p>
-        <p>آیدی: {info.id}</p>
-        <p><a href="/setup">تنظیم مجدد</a></p>
+        <p>✅ ربات: {info.first_name}</p>
+        <p>✅ یوزرنیم: @{info.username}</p>
+        <p>✅ آیدی: {info.id}</p>
+        <p>✅ وضعیت: متصل</p>
+        <p><a href="/setup">تنظیم مجدد ربات</a></p>
         """
     except Exception as e:
         return f"❌ خطا: {e}"
@@ -93,4 +126,5 @@ if __name__ == "__main__":
     setup_bot()
     
     port = int(os.environ.get("PORT", 8000))
+    logger.info(f"🌐 پورت: {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
